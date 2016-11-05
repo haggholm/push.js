@@ -79,7 +79,7 @@
         hasPermission = false,
 
         /* Map of open notifications */
-        notifications = {},
+        notificationWrappers = {},
 
         /* Testing variable for the last service worker path used */
         lastWorkerPath = null,
@@ -95,9 +95,13 @@
          */
         closeNotification = function (id) {
             var errored = false,
-                notification = notifications[id];
+                notificationWrapper = notificationWrappers[id];
 
-            if (typeof notification !== 'undefined') {
+            if (typeof notificationWrapper !== 'undefined') {
+                notificationWrapper.get(function(err, notification) {
+                    "use strict";
+
+                })
                 /* Safari 6+, Chrome 23+ */
                 if (notification.close) {
                     notification.close();
@@ -160,6 +164,7 @@
          */
         createCallback = function (title, options) {
             var notification,
+                notificationPromise,
                 wrapper,
                 id,
                 onClose;
@@ -170,7 +175,8 @@
             /* Set the last service worker path for testing */
             self.lastWorkerPath = options.serviceWorker || 'sw.js';
 
-            id = options.tag || currentId++;
+            /* Assign the id ahead of time so we have it even if we go async (promises) */
+            id = currentId++;
 
             /* onClose event handler */
             onClose = function () {
@@ -195,28 +201,30 @@
                     );
                 } catch (e) {
                     if (w.navigator) {
-                        w.navigator.serviceWorker.register(options.serviceWorker || 'sw.js')
-                        .then(function(registration) {
-                            registration.showNotification(
-                                title,
-                                {
-                                    icon: options.icon,
-                                    body: options.body,
-                                    vibrate: options.vibrate,
-                                    tag: options.tag,
-                                    data: options.data,
-                                    requireInteraction: options.requireInteraction
-                                }
-                            ).then(function() {
+                        notificationPromise = w.navigator.serviceWorker
+                            .register(options.serviceWorker || 'sw.js')
+                            .then(function(registration) {
+                                return registration.showNotification(
+                                    title,
+                                    {
+                                        icon: options.icon,
+                                        body: options.body,
+                                        vibrate: options.vibrate,
+                                        tag: options.tag,
+                                        data: options.data,
+                                        requireInteraction: options.requireInteraction
+                                    }
+                                );
+                            }).then(function() {
                                 return registration.getNotifications({tag: options.tag});
                             }).then(function(notifications) {
                                 if (notifications && notifications.length) {
                                     addNotification(id, notifications[0]);
+                                    return notifications[0];
+                                } else {
+                                    return null;
                                 }
                             });
-
-                            return null;
-                        });
                     }
                 }
 
@@ -259,19 +267,42 @@
                 throw new Error('Unable to create notification: unknown interface');
             }
 
-            /* Add it to the global array */
-            addNotification(id, notification);
+            if (notification) {
+                /* Wrapper used to get/close notification later on */
+                wrapper = {
+                    get: function (callback) {
+                        callback(null, notification);
+                    },
 
-            /* Wrapper used to get/close notification later on */
-            wrapper = {
-                get: function () {
-                    return notification;
-                },
+                    close: function () {
+                        closeNotification(id);
+                    }
+                };
 
-                close: function () {
-                    closeNotification(id);
-                }
-            };
+            } else {
+                /* Wrapper used to get/close notification later on */
+                wrapper = {
+                    get: function (callback) {
+                        return notificationPromise
+                            .then(function(notification) {
+                                callback(null, notification);
+                            })
+                            .catch(function(err) {
+                                callback(err);
+                            });
+                    },
+
+                    close: function () {
+                        notificationPromise.then(function() {
+                            closeNotification(id);
+                        });
+                    }
+                };
+            }
+
+            /* Add it to the global array (if we created it synchronously) */
+            addNotificationWrapper(id, wrapper);
+
 
             /* Autoclose timeout */
             if (options.timeout) {
